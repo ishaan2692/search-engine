@@ -47,8 +47,8 @@ DEFAULT_HEADERS = {
 }
 
 # Streamlit app
-st.set_page_config(page_title="PetPaws Search", layout="wide")
-st.title("🐾 PetPaws - Pet Product Search Engine")
+st.set_page_config(page_title="PawSearch", layout="wide")
+st.title("🐾 Pet Product Search Engine")
 
 # Functions
 def safe_get(soup, selectors):
