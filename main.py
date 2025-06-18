@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import numpy as np
 import re
 import sqlite3
 import hashlib
@@ -11,6 +10,8 @@ from io import BytesIO
 from PIL import Image
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import concurrent.futures
+import random
 
 # Initialize SQLite database
 conn = sqlite3.connect('pet_products.db')
@@ -33,18 +34,19 @@ vectorizer = TfidfVectorizer(stop_words='english')
 
 # Enhanced product schema with fallback selectors
 PRODUCT_SCHEMA = {
-    'title': ['h1.product-title', 'h1.product-name', 'h1.title', '[itemprop="name"]'],
-    'description': ['.product-description', '.details', '[itemprop="description"]', '.product-detail-description'],
-    'price': ['.price', '.product-price', '.pricing', '[itemprop="price"]'],
-    'image': ['img.product-image', 'img.primary-image', '[itemprop="image"]']
+    'title': ['h1.product-title', 'h1.product-name', 'h1.title', '[itemprop="name"]', 'h1'],
+    'description': ['.product-description', '.details', '[itemprop="description"]', '.product-detail-description', '.description'],
+    'price': ['.price', '.product-price', '.pricing', '[itemprop="price"]', '.price-value'],
+    'image': ['img.product-image', 'img.primary-image', '[itemprop="image"]', 'img.main-image']
 }
 
 # Browser-mimicking headers to avoid blocks 
-DEFAULT_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-}
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36'
+]
 
 # Streamlit app
 st.set_page_config(page_title="PetPaws Search", layout="wide")
@@ -53,14 +55,25 @@ st.title("🐾 PetPaws - Pet Product Search Engine")
 # Functions
 def safe_get(soup, selectors):
     for selector in selectors:
-        element = soup.select_one(selector)
-        if element:
-            if 'img' in selector:
-                return element.get('src', '')
-            return element.get_text(strip=True)
+        try:
+            element = soup.select_one(selector)
+            if element:
+                if 'img' in selector:
+                    return element.get('src', '')
+                return element.get_text(strip=True)
+        except:
+            continue
     return ''
 
-def crawl_site(url, depth=2):
+def get_random_headers():
+    return {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.google.com/'
+    }
+
+def crawl_site(url, depth=1):
     visited = set()
     to_visit = [url]
     product_links = []
@@ -71,24 +84,28 @@ def crawl_site(url, depth=2):
             continue
             
         try:
-            response = requests.get(current_url, headers=DEFAULT_HEADERS, timeout=10)
+            headers = get_random_headers()
+            response = requests.get(current_url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, 'html.parser')
             visited.add(current_url)
             
             # Find product links using broad patterns 
             for link in soup.find_all('a', href=True):
                 href = link['href']
+                if not href or href.startswith('javascript:') or href.startswith('mailto:'):
+                    continue
+                    
                 full_url = requests.compat.urljoin(current_url, href)
                 
                 # Match multiple URL patterns seen in pet sites
-                if any(pat in full_url for pat in ['/b/', '/dp/', '/product/', '/p/', '/shop/', '-food', '-toys', '/category/']):
+                if any(pat in full_url for pat in ['/b/', '/dp/', '/product/', '/p/', '/shop/', '-food', '-toys', '/category/', 'item']):
                     if full_url not in product_links and "customer-reviews" not in full_url:
                         product_links.append(full_url)
-                elif depth > 1 and full_url.startswith(url):
+                elif depth > 1 and full_url.startswith(url) and '#' not in full_url:
                     to_visit.append(full_url)
             
             depth -= 1
-            time.sleep(1)  # Increased politeness delay
+            time.sleep(random.uniform(1.0, 2.5))  # Randomized politeness delay
             
         except Exception as e:
             st.warning(f"Error crawling {current_url}: {str(e)}")
@@ -97,7 +114,8 @@ def crawl_site(url, depth=2):
 
 def scrape_product(url):
     try:
-        response = requests.get(url, headers=DEFAULT_HEADERS, timeout=10)
+        headers = get_random_headers()
+        response = requests.get(url, headers=headers, timeout=20)  # Increased timeout
         soup = BeautifulSoup(response.text, 'html.parser')
         
         product = {'url': url}
@@ -113,7 +131,7 @@ def scrape_product(url):
         # Enhanced pet type detection
         pet_type = "Other"
         pet_keywords = {
-            "Dog": ['dog', 'puppy', 'canine'],
+            "Dog": ['dog', 'puppy', 'canine', 'k9'],
             "Cat": ['cat', 'kitten', 'feline'],
             "Fish": ['fish', 'aquarium', 'aquatic'],
             "Bird": ['bird', 'parrot', 'avian']
@@ -128,7 +146,7 @@ def scrape_product(url):
         img_data = b''
         if product['image'] and product['image'].startswith('http'):
             try:
-                img_response = requests.get(product['image'], timeout=5)
+                img_response = requests.get(product['image'], headers=headers, timeout=10)
                 if img_response.status_code == 200:
                     img_data = img_response.content
             except:
@@ -148,6 +166,19 @@ def scrape_product(url):
     except Exception as e:
         st.warning(f"Error scraping {url}: {str(e)}")
         return None
+
+def scrape_with_retry(url, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            return scrape_product(url)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt < retries:
+                delay = (attempt + 1) * 5  # 5, 10 seconds delay
+                time.sleep(delay)
+                continue
+            else:
+                st.warning(f"Failed to scrape {url} after {retries+1} attempts")
+                return None
 
 def vectorize_products():
     c.execute("SELECT * FROM products")
@@ -192,24 +223,41 @@ with st.sidebar:
         all_products = []
         for site in DEMO_SITES:
             with st.spinner(f"Crawling {site}..."):
-                product_links = crawl_site(site, depth=2)
-                st.info(f"Found {len(product_links)} product links at {site}")
-                
-                progress_bar = st.progress(0)
-                scraped_count = 0
-                
-                for i, link in enumerate(product_links):
-                    product = scrape_product(link)
-                    if product:
-                        all_products.append(product)
-                        scraped_count += 1
+                try:
+                    product_links = crawl_site(site, depth=1)
+                    st.info(f"Found {len(product_links)} product links at {site}")
                     
-                    progress_bar.progress((i + 1) / len(product_links))
-                
-                st.success(f"Added {scraped_count} products from {site}")
+                    if not product_links:
+                        continue
+                    
+                    progress_bar = st.progress(0)
+                    scraped_count = 0
+                    
+                    # Use threading for faster scraping
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                        future_to_url = {executor.submit(scrape_with_retry, url): url for url in product_links}
+                        
+                        for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+                            url = future_to_url[future]
+                            try:
+                                product = future.result()
+                                if product:
+                                    all_products.append(product)
+                                    scraped_count += 1
+                            except Exception as e:
+                                st.warning(f"Error scraping {url}: {str(e)}")
+                            
+                            progress_bar.progress((i + 1) / len(product_links))
+                    
+                    st.success(f"Added {scraped_count} products from {site}")
+                except Exception as e:
+                    st.error(f"Error processing {site}: {str(e)}")
         
-        st.balloons()
-        st.success(f"✅ Total added: {len(all_products)} products to database")
+        if all_products:
+            st.balloons()
+            st.success(f"✅ Total added: {len(all_products)} products to database")
+        else:
+            st.warning("No products were added to the database")
     
     if st.button("🧹 Clear Database"):
         c.execute("DELETE FROM products")
@@ -233,7 +281,7 @@ with st.sidebar:
 # Main search interface
 df, vectors = vectorize_products()
 
-search_query = st.text_input("🔍 Search for pet products:", placeholder="Dog toys, cat food...")
+search_query = st.text_input("🔍 Search for pet products:", placeholder="Dog toys, cat food...", key="search_input")
 
 if st.button("Search") or search_query:
     if not search_query.strip():
@@ -259,12 +307,13 @@ if st.button("Search") or search_query:
                             img = Image.open(BytesIO(row['image']))
                             st.image(img, width=150)
                         except:
-                            st.image("https://placekitten.com/150/150", width=150)
+                            st.image("https://placekitten.com/150/150", width=150, caption="Placeholder")
                     else:
-                        st.image("https://placekitten.com/150/150", width=150)
+                        st.image("https://placekitten.com/150/150", width=150, caption="Placeholder")
                 
                 with col2:
-                    st.subheader(row['title'] if row['title'] else "Untitled Product")
+                    title = row['title'] if row['title'] else "Untitled Product"
+                    st.subheader(title)
                     
                     if row['price'] and row['price'] > 0:
                         st.metric("Price", f"${row['price']:.2f}")
@@ -291,7 +340,7 @@ db_data = c.fetchall()
 
 if db_data:
     db_df = pd.DataFrame(db_data, columns=['Title', 'Price', 'Pet Type', 'URL'])
-    st.dataframe(db_df, hide_index=True)
+    st.dataframe(db_df, hide_index=True, height=300)
 else:
     st.info("Database is empty. Click 'Refresh Database' to populate.")
 
